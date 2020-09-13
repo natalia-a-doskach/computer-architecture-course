@@ -1,0 +1,347 @@
+format PE GUI 5.0
+entry Start
+
+include 'win32axp.inc'
+
+DIB_RGB_COLORS = 0
+
+
+section '.code' code readable executable
+
+
+                      align  16
+SquaredDistanceEstimate:  ; plotting F(x,y)=0
+                          ; given x at xmm0 and y at xmm1 (double precision), this should return F(x,y)^2/(gradF(x,y).gradF(x,y)) in xmm0 (single precision)
+                          ; for F(x,y) = x^2+a y^2-1, this is (x^2+a y^2-1)^2/((2x)^2+(2a y)^2)
+                      mulsd  xmm0,xmm0
+                      mulsd  xmm1,xmm1
+                      mulsd  xmm1,[a]
+                      movsd  xmm2,xmm1
+                      mulsd  xmm2,[a]
+                      addsd  xmm1,xmm0
+                      addsd  xmm2,xmm0
+                      subsd  xmm1,[.const_1]
+                      mulsd  xmm1,xmm1
+                      mulsd  xmm2,[.const_4]
+                   cvtsd2ss  xmm0,xmm1
+                   cvtsd2ss  xmm1,xmm2
+                      rcpss  xmm1,xmm1
+                      mulss  xmm0,xmm1
+                        ret
+
+                      align  8
+        .const_1: dq 1.0
+        .const_4: dq 4.0
+
+                      align  16
+ConvertToGrey:      ;  given # at xmm0, convert to color in eax
+                    ;  min(255,1.5*255/(1+#))
+                        mov  eax,3*128
+                        mov  ecx,255
+                   cvtsi2ss  xmm1,eax
+                      rcpss  xmm0,xmm0
+                      mulss  xmm1,xmm0
+                   cvtss2si  eax,xmm1
+                        cmp  eax,ecx
+                      cmova  eax,ecx
+                        mov  ecx,0x00010101
+                       imul  ecx
+                        ret
+
+
+; these are the size of the plotted region and the width of the line
+                      align  8
+         scale dq 2.0
+         width dq 1.0
+
+DrawBitmap:            push  ebp
+                        mov  ebp,esp
+                        sub  esp,8*8
+
+virtual at ebp-8*8
+
+ xmin  dq ?
+ xmax  dq ?
+ xstep dq ?
+ ymin  dq ?
+ ymax  dq ?
+ ystep dq ?
+ fac   dd ?
+
+end virtual
+
+
+                ; a = 2 + sin(t/500)
+
+                     invoke  GetTickCount
+                        mov  dword[esp-4],eax
+                       fild  dword[esp-4]
+                        mov  dword[esp-4],500
+                       fild  dword[esp-4]
+                      fdivp  st1,st0
+                       fsin
+                       fld1
+                       fadd  st1,st0
+                      faddp  st1,st0
+                       fstp  qword[a]
+
+
+
+                   ; find the window
+                       fild  [Bitmap.x]
+                       fild  [Bitmap.y]
+                      fdivp  st1,st0
+                      fsqrt
+                        fld  [scale]
+                        fld  st0
+                       fmul  st0,st2
+                        fst  [xmax]
+                       fchs
+                       fstp  [xmin]
+                     fdivrp  st1,st0
+                        fst  [ymax]
+                       fchs
+                       fstp  [ymin]
+
+                   ; find the pixel fac
+                       fild  [Bitmap.x]
+                       fild  [Bitmap.y]
+                      fmulp  st1,st0
+                        fld  [xmax]
+                        fld  [xmin]
+                      fsubp  st1,st0
+                        fld  [ymax]
+                        fld  [ymin]
+                      fsubp  st1,st0
+                      fmulp  st1,st0
+                        fld  [width]
+                      fmulp  st1,st0
+                      fdivp  st1,st0
+                       fstp  [fac]
+
+                   ; find xstep and ystep
+                        fld  [xmax]
+                        fld  [xmin]
+                      fsubp  st1,st0
+                       fild  [Bitmap.x]
+                      fdivp  st1,st0
+                       fstp  [xstep]
+                        fld  [ymax]
+                        fld  [ymin]
+                      fsubp  st1,st0
+                       fild  [Bitmap.y]
+                      fdivp  st1,st0
+                       fstp  [ystep]
+
+                   ; fill the bitmap
+                        mov  ebx,[ppvBits]
+                        mov  esi,[Bitmap.y]
+            .l1:        mov  edi,[Bitmap.x]
+              .l2:    movsd  xmm0,[xmax]
+                      movsd  xmm1,[ymax]
+                   cvtsi2sd  xmm2,edi
+                   cvtsi2sd  xmm3,esi
+                      mulsd  xmm2,[xstep]
+                      mulsd  xmm3,[ystep]
+                      subsd  xmm0,xmm2     ; x
+                      subsd  xmm1,xmm3     ; y
+                       call  SquaredDistanceEstimate
+                      mulss  xmm0,[fac]
+                       call  ConvertToGrey
+                        mov  [ebx],eax
+                        add  ebx,4
+                        sub  edi,1
+                        jnz  .l2
+                        sub  esi,1
+                        jnz  .l1
+
+
+                        mov  esp,ebp
+                        pop  ebp
+                        ret
+
+
+
+
+
+;;;;;;;;;;;;;;;;;;;; this is all standard stuff to open the window ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+Start:
+
+                     invoke  GetModuleHandle,0
+                        mov  [wc.hInstance],eax
+                        mov  [hInstance],eax
+                     invoke  LoadIcon,0,IDI_APPLICATION
+                        mov  [wc.hIcon],eax
+                     invoke  LoadCursor,0,IDC_ARROW
+                        mov  [wc.hCursor],eax
+                     invoke  RegisterClass,wc
+                       test  eax,eax
+                         jz  Error
+                     invoke  CreateWindowEx,0,MainWindowClass,MainWindowTitle,WS_VISIBLE+WS_OVERLAPPEDWINDOW,100,100,600,600,NULL,NULL,[wc.hInstance],NULL
+                        mov  [hMainWindow],eax
+                       test  eax,eax
+                         jz  Error
+
+  .MsgLoop:          invoke  PeekMessage,msg,NULL,0,0,PM_REMOVE
+                        cmp  [msg.message],WM_QUIT
+                         je  .EndLoop
+                     invoke  TranslateMessage,msg
+                     invoke  DispatchMessage,msg
+                        add  byte[PaintTimer],8
+                        jnz  .MsgLoop
+                       call  Paint
+                     invoke  Sleep,20
+                        jmp  .MsgLoop
+  .EndLoop:
+                     invoke  ExitProcess,[msg.wParam]
+
+Error:               invoke  MessageBox,NULL,_error,NULL,MB_ICONERROR+MB_OK
+                     invoke  ExitProcess,0
+
+
+
+proc WindowProc hwnd,wmsg,wparam,lparam
+
+                       push  esi edi ebx
+
+                        cmp  [wmsg],WM_CREATE
+                         je  .wmcreate
+                        cmp  [wmsg],WM_PAINT
+                         je  .wmpaint
+                        cmp  [wmsg],WM_SIZE
+                         je  .wmsize
+                        cmp  [wmsg],WM_DESTROY
+                         je  .wm_destroy
+
+  .defwndproc:       invoke  DefWindowProc,[hwnd],[wmsg],[wparam],[lparam]
+                        jmp  .return
+
+  .wmcreate:
+
+  .wmsize:           invoke  GetClientRect,[hwnd],rect
+                        mov  eax,[rect.right]
+                       test  eax,eax
+                         jz  .returnz
+                        mov  eax,[rect.right]
+                        mov  ecx,[rect.bottom]
+                        mov  [Bitmap.x],eax
+                        mov  [Bitmap.y],ecx
+                        mov  ecx,[hBitmap]
+                       test  ecx,ecx
+                         jz  .wmpaint_newbm
+                        jmp  .wmpaint_redobm
+
+  .wmpaint:          invoke  GetClientRect,[hMainWindow],rect
+                        mov  eax,[rect.right]
+                        mov  ecx,[hBitmap]
+                       test  eax,eax
+                         jz  .returnz
+                       test  ecx,ecx
+                         jz  .wmpaint_newbm
+    .wmpaint_ok:       call  Paint
+                        jmp  .returnz
+    .wmpaint_redobm: invoke  DeleteObject,[hBitmap]
+    .wmpaint_newbm:     mov  [bmiheader.biSize],sizeof.BITMAPINFOHEADER
+                        mov  eax,[Bitmap.x]
+                        mov  [bmiheader.biWidth],eax
+                        mov  eax,[Bitmap.y]
+                        neg  eax
+                        mov  [bmiheader.biHeight],eax
+                        mov  [bmiheader.biPlanes],1
+                        mov  [bmiheader.biBitCount],32
+                        mov  [bmiheader.biCompression],BI_RGB
+                        mov  eax,[Bitmap.x]
+                       imul  eax,[Bitmap.y]
+                        lea  eax,[4*eax+16]
+                        mov  [bmiheader.biSizeImage],eax
+                        mov  [bmiheader.biXPelsPerMeter],0
+                        mov  [bmiheader.biYPelsPerMeter],0
+                        mov  [bmiheader.biClrUsed],0
+                        mov  [bmiheader.biClrImportant],0
+                     invoke  CreateDIBSection,0,bmiheader,DIB_RGB_COLORS,ppvBits,0,0
+                        mov  [hBitmap],eax
+                        jmp  .wmpaint_ok
+
+.wm_destroy:         invoke  PostQuitMessage,0
+
+.returnz:               xor  eax,eax
+.return:                pop  ebx edi esi
+                        ret
+endp
+
+
+
+
+Paint:                  cmp  [hBitmap],0
+                         je  .Done
+
+                     invoke  InvalidateRect,[hMainWindow],rect,FALSE
+                     invoke  BeginPaint,[hMainWindow],ps
+                        mov  [hdc],eax
+                     invoke  CreateCompatibleDC,eax
+                       test  eax,eax
+                         jz  Error
+                        mov  [hMemDC],eax
+
+                       call  DrawBitmap
+
+                     invoke  SelectObject,[hMemDC],[hBitmap]
+                     invoke  BitBlt,[hdc],0,0,[rect.right],[rect.bottom],[hMemDC],0,0,SRCCOPY
+                     invoke  DeleteDC,[hMemDC]
+                     invoke  EndPaint,[hMainWindow],ps
+
+        .Done:          ret
+
+
+
+
+
+
+section '.idata' import data readable writeable
+
+ library kernel32,'KERNEL32.DLL',\
+         user32,'USER32.DLL',\
+         gdi32,'GDI32.DLL'
+
+include 'api\kernel32.inc'
+include 'api\user32.inc'
+include 'api\gdi32.inc'
+
+
+section '.data' data readable writeable
+
+
+align 4
+
+  wc WNDCLASS 0,WindowProc,0,0,NULL,NULL,NULL,COLOR_BTNFACE+1,NULL,MainWindowClass
+
+align 1
+  MainWindowTitle db 'plot', 0
+  MainWindowClass db 'plot32', 0
+  _error TCHAR 'Startup failed.',0
+
+align 8
+  a dq 2.0
+
+align 4
+  hMainWindow     dd ?
+  hStatusWindow   dd ?
+  hMainMenu       dd ?
+  hInstance       dd ?
+  ppvBits         dd ?
+  hMemDC          dd ?
+  hdc             dd ?
+  hBitmap         dd ?
+  Bitmap.x        dd ?
+  Bitmap.y        dd ?
+  TickCount       dd ?
+  bmiheader     BITMAPINFOHEADER
+
+  ps            PAINTSTRUCT
+  rc RECT
+  rect          RECT
+  msg           MSG
+
+align 1
+  PaintTimer db ?
